@@ -1,20 +1,17 @@
 extern crate getopts;
-extern crate photon;
 use getopts::Options;
-use photon::monochrome::grayscale;
-use photon::native;
-use photon::{native::open_image, PhotonImage};
-use std::time::Duration;
-use std::{env, fs, fs::metadata, path::PathBuf, str::FromStr, thread::sleep};
-
+use image::{io::Reader as ImageReader, DynamicImage, GenericImage};
+use std::{env, fs, fs::metadata, path::PathBuf, str::FromStr};
+/*
 const SUPPORTED_FORMATS: [&'static str; 18] = [
     ".jpg", ".jpeg", ".bmp", ".dds", ".exif", ".gif", ".jps", ".jp2", ".jpx", ".pcx", ".png",
     ".pnm", ".ras", ".tga", ".tif", ".tiff", ".xbm", ".xpm",
 ];
+*/
 
 fn main() {
-    let mut input_f: String = String::from("");
-    let mut output_f: String = String::from("");
+    let input_f: String;
+    let output_f: String;
     let mut image_size: (u32, u32) = (800u32, 800u32);
     let mut tolerance: u8 = 10;
     let mut padding: u32 = 50;
@@ -66,45 +63,64 @@ fn main() {
     let ip_md = metadata(&input_path).unwrap();
 
     if ip_md.is_file() {
-    } else {
+        let mut image = ImageReader::open(input_path.to_str().unwrap())
+            .unwrap()
+            .decode()
+            .unwrap();
+        image = process_image(image, image_size, padding, tolerance);
+        let mut save_location = output_path.clone();
+        save_location.push(input_path.file_name().clone().unwrap());
+        println!("save path: {}", save_location.to_str().unwrap());
+
+        match image.save(&save_location.to_str().unwrap()) {
+            Ok(what) => println!("{:?}", what),
+            Err(e) => panic!("{}", e),
+        };
+    } else if ip_md.is_dir() {
         for file in fs::read_dir(&input_path).unwrap() {
             let mut image_path = input_path.clone();
             image_path.push(file.as_ref().unwrap().file_name().clone());
 
             println!("File: {:?}", file.as_ref().unwrap().file_name());
 
-            let mut image = open_image(&image_path.to_str().unwrap()).expect("File should open");
+            let mut image = ImageReader::open(&image_path.to_str().unwrap())
+                .unwrap()
+                .decode()
+                .unwrap();
             image = process_image(image, image_size, padding, tolerance);
             let mut save_location = output_path.clone();
             save_location.push(file.as_ref().unwrap().file_name().clone());
-            photon::native::save_image(image, &save_location.to_str().unwrap());
+            match image.save(&save_location.to_str().unwrap()) {
+                Ok(what) => println!("{:?}", what),
+                Err(e) => panic!("{}", e),
+            };
         }
+    } else {
+        print_usage(&opts);
     }
 }
 
 fn process_image(
-    mut image: PhotonImage,
+    mut image: DynamicImage,
     size: (u32, u32),
     padding: u32,
     tolerance: u8,
-) -> PhotonImage {
-    let mut image_grayscale = image.clone();
+) -> DynamicImage {
+    let mut image_grayscale = image.clone().to_luma8();
 
     let (target_width, target_height) = size;
     let (padded_width, padded_height) =
         (target_width - (2 * padding), target_height - (2 * padding));
 
-    grayscale(&mut image_grayscale);
     let (left, top, right, bottom) = image_boundbox(&mut image_grayscale, tolerance);
 
     println!(
         "left {} top {} right {} bottom {}",
-        left, top, right, bottom
+        &left, &top, &right, &bottom
     );
-    let actual_object = photon::transform::crop(&mut image, left, top, right, bottom);
-    let object_width = actual_object.get_width();
-    let object_height = actual_object.get_height();
-    photon::native::save_image(actual_object.clone(), "./actual_object.jpg");
+    let mut actual_object = image.crop(left, top, right - left, bottom - top);
+    let object_width = actual_object.width();
+    let object_height = actual_object.height();
     let size_change_x = padded_width - object_width;
     let size_change_y = padded_height - object_height;
     let new_size_x: u32;
@@ -120,38 +136,42 @@ fn process_image(
         new_size_x = (object_width + (object_width * (increment / object_height))) as u32;
     }
 
-    let unpadded_image = photon::transform::resize(
-        &actual_object,
+    println!("NewSizeX: {} NewSizeY: {}", new_size_x, new_size_y);
+
+    actual_object = actual_object.resize(
         new_size_x,
         new_size_y,
-        photon::transform::SamplingFilter::Gaussian,
+        image::imageops::FilterType::Gaussian,
     );
 
-    let final_image = photon::transform::padding_uniform(
-        &unpadded_image,
-        padding,
-        photon::Rgba::new(255, 255, 255, 255),
+    let mut final_image = image::DynamicImage::new_rgb8(target_width, target_height);
+    final_image
+        .copy_from(
+            &actual_object,
+            ((target_width / 2) - (new_size_x / 2)) as u32,
+            ((target_height / 2) - (new_size_y / 2)) as u32,
+        )
+        .unwrap();
+
+    println!(
+        "PasteX: {} PasteY: {}",
+        ((target_width / 2) - (new_size_x / 2)) as u32,
+        ((target_height / 2) - (new_size_y / 2)) as u32
     );
 
     final_image.clone()
 }
 
-fn image_boundbox(image: &mut PhotonImage, tolerance: u8) -> (u32, u32, u32, u32) {
-    let mut data = image.get_raw_pixels();
-    let width = image.get_width();
-    let height = image.get_height();
+fn image_boundbox(image: &mut image::GrayImage, tolerance: u8) -> (u32, u32, u32, u32) {
+    let width = image.width();
+    let height = image.height();
 
     let t = ((255u8 - tolerance)..=255u8).collect::<Vec<u8>>();
 
     let mut left: u32 = 0;
     for y in 0..height {
         for x in 0..width {
-            if !t.contains(&data[((y * width * 4) + (x * 4)) as usize]) {
-                data[((y * width * 4) + (x * 4)) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 1) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 2) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 3) as usize] = 0u8;
-
+            if !t.contains(&image.get_pixel(x, y)[0]) {
                 if (x > left && left == 0) || (x < left && left != 0) {
                     left = x;
                     break;
@@ -163,12 +183,7 @@ fn image_boundbox(image: &mut PhotonImage, tolerance: u8) -> (u32, u32, u32, u32
     let mut right = width;
     for y in 0..height {
         for x in (left..width).rev() {
-            if !t.contains(&data[((y * width * 4) + (x * 4)) as usize]) {
-                data[((y * width * 4) + (x * 4)) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 1) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 2) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 3) as usize] = 0u8;
-
+            if !t.contains(&image.get_pixel(x, y)[0]) {
                 if (x < right && right == width) || (x > right && right != width) {
                     right = x;
                     break;
@@ -180,12 +195,7 @@ fn image_boundbox(image: &mut PhotonImage, tolerance: u8) -> (u32, u32, u32, u32
     let mut top = 0;
     for x in left..right {
         for y in 0..height {
-            if !t.contains(&data[((y * width * 4) + (x * 4)) as usize]) {
-                data[((y * width * 4) + (x * 4)) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 1) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 2) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 3) as usize] = 0u8;
-
+            if !t.contains(&image.get_pixel(x, y)[0]) {
                 if (y > top && top == 0) || y < top && top != 0 {
                     top = y;
                     break;
@@ -197,12 +207,7 @@ fn image_boundbox(image: &mut PhotonImage, tolerance: u8) -> (u32, u32, u32, u32
     let mut bottom = height;
     for x in left..right {
         for y in (top..height).rev() {
-            if !t.contains(&data[((y * width * 4) + (x * 4)) as usize]) {
-                data[((y * width * 4) + (x * 4)) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 1) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 2) as usize] = 0u8;
-                data[((y * width * 4) + (x * 4) + 3) as usize] = 0u8;
-
+            if !t.contains(&image.get_pixel(x, y)[0]) {
                 if (y < bottom && bottom == height) || (y > bottom && bottom != height) {
                     bottom = y;
                     break;
@@ -211,13 +216,14 @@ fn image_boundbox(image: &mut PhotonImage, tolerance: u8) -> (u32, u32, u32, u32
         }
     }
 
-    photon::native::save_image(PhotonImage::new(data, width, height), "./collisions.jpg");
     (left, top, right, bottom)
 }
 
+/*
 fn support_extensions(input: &str) -> bool {
     SUPPORTED_FORMATS.contains(&input)
 }
+*/
 
 fn prepare_cmd_opts() -> Options {
     let mut opts = Options::new();
