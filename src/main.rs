@@ -2,12 +2,6 @@ extern crate getopts;
 use getopts::Options;
 use image::{io::Reader as ImageReader, DynamicImage, GenericImage};
 use std::{env, fs, fs::metadata, path::PathBuf, str::FromStr};
-/*
-const SUPPORTED_FORMATS: [&'static str; 18] = [
-    ".jpg", ".jpeg", ".bmp", ".dds", ".exif", ".gif", ".jps", ".jp2", ".jpx", ".pcx", ".png",
-    ".pnm", ".ras", ".tga", ".tif", ".tiff", ".xbm", ".xpm",
-];
-*/
 
 fn main() {
     let input_f: String;
@@ -70,7 +64,6 @@ fn main() {
         image = process_image(image, image_size, padding, tolerance);
         let mut save_location = output_path.clone();
         save_location.push(input_path.file_name().clone().unwrap());
-        println!("save path: {}", save_location.to_str().unwrap());
 
         match image.save(&save_location.to_str().unwrap()) {
             Ok(what) => println!("{:?}", what),
@@ -80,8 +73,6 @@ fn main() {
         for file in fs::read_dir(&input_path).unwrap() {
             let mut image_path = input_path.clone();
             image_path.push(file.as_ref().unwrap().file_name().clone());
-
-            println!("File: {:?}", file.as_ref().unwrap().file_name());
 
             let mut image = ImageReader::open(&image_path.to_str().unwrap())
                 .unwrap()
@@ -114,52 +105,47 @@ fn process_image(
 
     let (left, top, right, bottom) = image_boundbox(&mut image_grayscale, tolerance);
 
-    println!(
-        "left {} top {} right {} bottom {}",
-        &left, &top, &right, &bottom
-    );
     let mut actual_object = image.crop(left, top, right - left, bottom - top);
-    let object_width = actual_object.width();
-    let object_height = actual_object.height();
-    let size_change_x = padded_width - object_width;
-    let size_change_y = padded_height - object_height;
-    let new_size_x: u32;
-    let new_size_y: u32;
+
+    let object_width: i32 = actual_object.width() as i32;
+    let object_height: i32 = actual_object.height() as i32;
+    let size_change_x: i32 = padded_width as i32 - object_width as i32;
+    let size_change_y: i32 = padded_height as i32 - object_height as i32;
+    let new_size_x: i32;
+    let new_size_y: i32;
 
     if object_width > object_height {
-        new_size_x = object_width + size_change_x;
-        let increment = new_size_x - object_width;
-        new_size_y = (object_height + (object_height * (increment / object_width))) as u32;
+        new_size_x = object_width as i32 + size_change_x as i32;
+        let increment: i32 = new_size_x - object_width as i32;
+        new_size_y =
+            object_height + (object_height * (increment as f32 / object_width as f32) as i32);
     } else {
         new_size_y = object_height + size_change_y;
-        let increment = new_size_y - object_height;
-        new_size_x = (object_width + (object_width * (increment / object_height))) as u32;
+        let increment: i32 = new_size_y - object_height;
+        new_size_x =
+            object_width + (object_width * (increment as f32 / object_height as f32) as i32);
     }
 
-    println!("NewSizeX: {} NewSizeY: {}", new_size_x, new_size_y);
-
-    actual_object = actual_object.resize(
-        new_size_x,
-        new_size_y,
+    actual_object = actual_object.resize_exact(
+        new_size_x as u32,
+        new_size_y as u32,
         image::imageops::FilterType::Gaussian,
     );
 
     let mut final_image = image::DynamicImage::new_rgb8(target_width, target_height);
+    for x in 0..final_image.width() {
+        for y in 0..final_image.height() {
+            final_image.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+        }
+    }
+
+    let ps_x: i32 = ((target_width as f32 / 2f32) - (new_size_x as f32 / 2f32)) as i32;
+    let ps_y: i32 = ((target_height as f32 / 2f32) - (new_size_y as f32 / 2f32)) as i32;
     final_image
-        .copy_from(
-            &actual_object,
-            ((target_width / 2) - (new_size_x / 2)) as u32,
-            ((target_height / 2) - (new_size_y / 2)) as u32,
-        )
+        .copy_from(&actual_object, ps_x as u32, ps_y as u32)
         .unwrap();
 
-    println!(
-        "PasteX: {} PasteY: {}",
-        ((target_width / 2) - (new_size_x / 2)) as u32,
-        ((target_height / 2) - (new_size_y / 2)) as u32
-    );
-
-    final_image.clone()
+    final_image
 }
 
 fn image_boundbox(image: &mut image::GrayImage, tolerance: u8) -> (u32, u32, u32, u32) {
@@ -219,12 +205,6 @@ fn image_boundbox(image: &mut image::GrayImage, tolerance: u8) -> (u32, u32, u32
     (left, top, right, bottom)
 }
 
-/*
-fn support_extensions(input: &str) -> bool {
-    SUPPORTED_FORMATS.contains(&input)
-}
-*/
-
 fn prepare_cmd_opts() -> Options {
     let mut opts = Options::new();
     opts.reqopt(
@@ -253,30 +233,6 @@ fn prepare_cmd_opts() -> Options {
         "How much white space will the result image have around the object.",
         "VALUE",
     );
-
-    /*
-    opts.optflag(
-        "l",
-        "logs",
-        "Enable's logging of information about the image. In ternimal and in output file.",
-    );
-    opts.optflag(
-        "f",
-        "force",
-        "Overwrite output file in case it already exists. Without this the program does not replace images.");
-    opts.optflag(
-        "c",
-        "color",
-        "Preview each image after it's done being processed.",
-    );
-    opts.optflag("g", "grayscale", "Show grayscale image");
-    opts.optflag(
-        "m",
-        "mark",
-        "Keep track of collisions and show them in grayscale result.",
-    );
-    opts.optflag("w", "watch", "Run script as a watcher that notices file changes in input directory and outputs the result in the output directory.");
-    */
     opts.optflag("h", "help", "Shows this manual.");
 
     return opts;
